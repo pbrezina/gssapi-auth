@@ -28,42 +28,123 @@
 
 #include "utils.h"
 
-int main(int argc, const char **argv)
+static int
+initiator_establish_context(const char *service,
+                            OM_uint32 flags,
+                            int fd)
 {
-    const char *principal;
-    const char *socket_path;
-    int socket_fd = -1;
+    bool established;
+    gss_ctx_id_t ctx = GSS_C_NO_CONTEXT;
+    gss_buffer_desc input_token = GSS_C_EMPTY_BUFFER;
+    gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
+    gss_name_t target_name = GSS_C_NO_NAME;
+    gss_OID mech_type;
+    OM_uint32 major = 0;
+    OM_uint32 minor = 0;
+    OM_uint32 ret_flags;
     int ret;
 
-    ret = parse_options(argc, argv, &principal, &socket_path, NULL);
+    ret = set_name(service, &target_name);
+    if (ret != 0) {
+        return ret;
+    }
+
+    /* Do the handshake. */
+    established = false;
+    while (!established) {
+        major = gss_init_sec_context(&minor, GSS_C_NO_CREDENTIAL, &ctx,
+                                     target_name, GSS_C_NO_OID, flags, 0,
+                                     NULL, &input_token, NULL, &output_token,
+                                     &ret_flags, NULL);
+
+        free(input_token.value);
+        memset(&input_token, 0, sizeof(gss_buffer_desc));
+
+        if (major == GSS_S_CONTINUE_NEEDED || output_token.length > 0) {
+            ret = write_buf(fd, output_token.value, output_token.length);
+            if (ret != 0) {
+                fprintf(stderr, "Unable to write data [%d]: %s\n",
+                        ret, strerror(ret));;
+                goto done;
+            }
+        }
+
+        gss_release_buffer(&minor, &output_token);
+        if (GSS_ERROR(major)) {
+            fprintf(stderr, "gss_init_sec_context() error major 0x%x\n", major);
+            ret = EIO;
+            goto done;
+        }
+
+        if (major == GSS_S_CONTINUE_NEEDED) {
+            ret = read_buf(fd, (uint8_t **)&input_token.value,
+                           &input_token.length);
+            if (ret != 0) {
+                fprintf(stderr, "Unable to read data [%d]: %s\n",
+                        ret, strerror(ret));;
+                goto done;
+            }
+        } else if (major == GSS_S_COMPLETE) {
+            established = true;
+        } else {
+            fprintf(stderr, "Context is not established but major has "
+                    "unexpected value: %x\n", major);
+            ret = EIO;
+            goto done;
+        }
+    }
+
+    if (ret_flags & flags != flags) {
+        fprintf(stderr, "Negotiated context does not support requested flags\n");
+        ret = EIO;
+        goto done;
+    }
+
+    ret = 0;
+
+done:
+    /* Do not request a context deletion token; pass NULL. */
+    gss_delete_sec_context(&minor, &ctx, NULL);
+    gss_release_name(&minor, &target_name);
+
+    return ret;
+}
+
+int main(int argc, const char **argv)
+{
+    const char *service;
+    const char *socket_path;
+    int fd = -1;
+    int ret;
+
+    ret = parse_client_options(argc, argv, &service, &socket_path);
     if (ret != 0) {
         goto done;
     }
 
     printf("Trying to establish security context:\n");
-    printf("  Service Principal: %s\n",  principal);
+    printf("  Service Name: %s\n", service);
     printf("  Socket: %s\n", socket_path);
 
-    ret = init_client(socket_path, &socket_fd);
+    ret = init_client(socket_path, &fd);
     if (ret != 0) {
         fprintf(stderr, "Unable to connect to the server!\n");
         goto done;
     }
 
-    ret = establish_context(principal, GSS_C_NO_CREDENTIAL, GSS_C_MUTUAL_FLAG,
-                            socket_fd, true);
+    ret = initiator_establish_context(service, GSS_C_MUTUAL_FLAG, fd);
     if (ret != 0) {
         fprintf(stderr, "Unable to establish security context!\n");
         goto done;
     }
 
-    printf("Security context with %s successfully established.\n", principal);
+    printf("Security context with %s successfully established.\n", service);
 
     ret = 0;
 
 done:
-    if (socket_fd != -1) {
-        close(socket_fd);
+    if (fd != -1) {
+        close(fd);
     }
 
     if (ret != 0) {

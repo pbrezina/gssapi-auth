@@ -22,11 +22,16 @@
 #define _UTILS_H_
 
 int
-parse_options(int argc,
-              const char **argv,
-              const char **_principal,
-              const char **_socket_path,
-              const char **_keytab_path);
+parse_client_options(int argc,
+                     const char **argv,
+                     const char **_name,
+                     const char **_socket_path);
+
+int
+parse_server_options(int argc,
+                     const char **argv,
+                     const char **_socket_path,
+                     const char **_keytab_path);
 
 int
 init_server(const char *socket_path,
@@ -41,10 +46,13 @@ set_name(const char *principal,
          gss_name_t *_name);
 
 int
-establish_context(const char *principal,
-                  gss_cred_id_t creds,
-                  OM_uint32 flags,
-                  int fd,
-                  bool initiator);
+get_name(gss_name_t name,
+         char **_name);
+
+int
+read_buf(int fd, uint8_t **_buf, size_t *_len);
+
+int
+write_buf(int fd, uint8_t *buf, size_t len);
 
 #endif /* _UTILS_H_ */

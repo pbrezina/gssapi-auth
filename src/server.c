@@ -27,50 +27,107 @@
 #include <sys/un.h>
 #include <stdbool.h>
 #include <signal.h>
-#include <gssapi/gssapi_krb5.h>
+#include <stdlib.h>
 
 #include "utils.h"
 
 static int
-acquire_creds(const char *principal,
-              const char *keytab,
-              gss_cred_id_t *_creds)
+acceptor_establish_context(OM_uint32 flags,
+                           int fd,
+                           char **_client)
 {
-    gss_name_t name = GSS_C_NO_NAME;
+    bool established;
+    gss_ctx_id_t ctx = GSS_C_NO_CONTEXT;
+    gss_buffer_desc input_token = GSS_C_EMPTY_BUFFER;
+    gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
+    gss_name_t client_name = GSS_C_NO_NAME;
+    gss_buffer_t exported_name = NULL;
+    gss_OID mech_type;
     OM_uint32 major = 0;
     OM_uint32 minor = 0;
+    OM_uint32 ret_flags;
+    char *str_name;
     int ret;
 
-    if (keytab != NULL) {
-        major = krb5_gss_register_acceptor_identity(keytab);
+    ret = read_buf(fd, (uint8_t **)&input_token.value, &input_token.length);
+    if (ret == ENOLINK) {
+        fprintf(stderr,
+                "Client closed the connection before sending input data\n");
+        goto done;
+    } else if (ret != 0) {
+        fprintf(stderr, "Unable to read data [%d]: %s\n", ret, strerror(ret));;
+        goto done;
+    }
+
+    /* Do the handshake. */
+    established = false;
+    while (!established) {
+        major = gss_accept_sec_context(&minor, &ctx, GSS_C_NO_CREDENTIAL,
+                                       &input_token, NULL, &client_name,
+                                       &mech_type, &output_token, &ret_flags,
+                                       NULL, NULL);
+
+        free(input_token.value);
+        memset(&input_token, 0, sizeof(gss_buffer_desc));
+
+        if (major == GSS_S_CONTINUE_NEEDED || output_token.length > 0) {
+            ret = write_buf(fd, output_token.value, output_token.length);
+            if (ret != 0) {
+                fprintf(stderr, "Unable to write data [%d]: %s\n",
+                        ret, strerror(ret));;
+                goto done;
+            }
+        }
+
+        gss_release_buffer(&minor, &output_token);
         if (GSS_ERROR(major)) {
-            fprintf(stderr, "Unable to set keytab location\n");
-            return EIO;
+            fprintf(stderr, "gss_accept_sec_context() error major 0x%x\n",
+                    major);
+            ret = EIO;
+            goto done;
+        }
+
+        if (major == GSS_S_CONTINUE_NEEDED) {
+            ret = read_buf(fd, (uint8_t **)&input_token.value,
+                           &input_token.length);
+            if (ret != 0) {
+                fprintf(stderr, "Unable to read data [%d]: %s\n",
+                        ret, strerror(ret));;
+                goto done;
+            }
+        } else if (major == GSS_S_COMPLETE) {
+            established = true;
+        } else {
+            fprintf(stderr, "Context is not established but major has "
+                    "unexpected value: %x\n", major);
+            ret = EIO;
+            goto done;
         }
     }
 
-    ret = set_name(principal, &name);
-    if (ret != 0) {
-        return ret;
+    if (ret_flags & flags != flags) {
+        fprintf(stderr, "Negotiated context does not support requested flags\n");
+        ret = EIO;
+        goto done;
     }
 
-    major = gss_acquire_cred(&minor, name, 0, GSS_C_NULL_OID_SET, GSS_C_ACCEPT,
-                             _creds, NULL, NULL);
-    gss_release_name(&minor, &name);
-    if (GSS_ERROR(major)) {
-        fprintf(stderr, "Unable to acquire credentials\n");
-        return EIO;
-    }
+    ret = get_name(client_name, _client);
 
-    return 0;
+done:
+    /* Do not request a context deletion token; pass NULL. */
+    gss_delete_sec_context(&minor, &ctx, NULL);
+    gss_release_name(&minor, &client_name);
+
+    return ret;
 }
 
 int
-server_loop(int socket_fd, const char *principal, gss_cred_id_t creds)
+server_loop(int socket_fd)
 {
     struct sockaddr_un client;
     socklen_t client_len = sizeof(client);
     char buf[100] = {'\0'};
+    char *client_name;
     int client_fd;
     int ret;
 
@@ -85,14 +142,18 @@ server_loop(int socket_fd, const char *principal, gss_cred_id_t creds)
 
         printf("Accepted connection: %d\n", client_fd);
 
-        ret = establish_context(principal, creds, GSS_C_MUTUAL_FLAG,
-                                client_fd, false);
+        ret = acceptor_establish_context(GSS_C_MUTUAL_FLAG, client_fd,
+                                         &client_name);
         if (ret != 0) {
             fprintf(stderr, "Unable to establish context with client %d\n",
                     client_fd);
+            close(client_fd);
+            continue;
         }
 
-        printf("Security context with %s successfully established.\n", principal);
+        printf("Security context with %s successfully established.\n",
+               client_name);
+        free(client_name);
         close(client_fd);
     }
 
@@ -104,41 +165,31 @@ int main(int argc, const char **argv)
     const char *principal;
     const char *socket_path;
     const char *keytab_path = NULL;
-    gss_cred_id_t creds = GSS_C_NO_CREDENTIAL;
-    OM_uint32 minor = 0;
-    int socket_fd;
     int ret;
+    int fd;
 
-    ret = parse_options(argc, argv, &principal, &socket_path, &keytab_path);
+    ret = parse_server_options(argc, argv, &socket_path, &keytab_path);
     if (ret != 0) {
         goto done;
     }
 
     printf("Trying to establish security context:\n");
-    printf("  Service Principal: %s\n",  principal);
     printf("  Socket: %s\n", socket_path);
     printf("  Keytab: %s\n", keytab_path != NULL ? keytab_path : "default");
 
-    ret = init_server(socket_path, &socket_fd);
+    if (keytab_path != NULL) {
+        setenv("KRB5_KTNAME", keytab_path, 1);
+    }
+
+    ret = init_server(socket_path, &fd);
     if (ret != 0) {
         fprintf(stderr, "Unable to create server!\n");
         goto done;
     }
 
-    ret = acquire_creds(principal, keytab_path, &creds);
-    if (ret != 0) {
-        goto done;
-    }
-
-    ret = server_loop(socket_fd, principal, creds);
-
-    ret = 0;
+    ret = server_loop(fd);
 
 done:
-    if (creds != GSS_C_NO_CREDENTIAL) {
-        gss_release_cred(&minor, &creds);
-    }
-
     if (ret != 0) {
         return EXIT_FAILURE;
     }

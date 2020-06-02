@@ -31,11 +31,10 @@
 #include <unistd.h>
 
 int
-parse_options(int argc,
-              const char **argv,
-              const char **_principal,
-              const char **_socket_path,
-              const char **_keytab_path)
+parse_client_options(int argc,
+                     const char **argv,
+                     const char **_name,
+                     const char **_socket_path)
 {
     poptContext pc;
     char opt;
@@ -44,27 +43,53 @@ parse_options(int argc,
 
     struct poptOption options[] = {
         POPT_AUTOHELP
-        { "socket-path", 's', POPT_ARG_STRING, _socket_path, 0, "Path to the server socket", NULL },
-        { "principal", 'p', POPT_ARG_STRING, _principal, 0, "Kerberos service principal to acquire", NULL },
-        { "keytab", 'k', POPT_ARG_STRING, _keytab_path, 0, "Path to Kerberos keytab that contains credentials for the principal", NULL },
+        { "socket-path", 's', POPT_ARG_STRING, _socket_path, 0,
+          "Path to the server socket", NULL },
+        { "name", 'n', POPT_ARG_STRING, _name, 0,
+          "Hostbased service name", NULL },
         POPT_TABLEEND
     };
-
-    if (_keytab_path == NULL) {
-        for (i = 0; options[i].longName != NULL; i++) {
-            if (strcmp(options[i].longName, "keytab") == 0) {
-                memset(&options[i], 0, sizeof(struct poptOption));
-                break;
-            }
-        }
-    }
 
     pc = poptGetContext(NULL, argc, argv, options, 0);
     while ((opt = poptGetNextOpt(pc)) > 0) {
 
     }
 
-    if (opt != -1 || *_principal == NULL || *_socket_path == NULL) {
+    if (opt != -1 || *_name == NULL || *_socket_path == NULL) {
+        poptPrintUsage(pc, stderr, 0);
+        return EINVAL;
+    }
+
+    poptFreeContext(pc);
+    return 0;
+}
+
+int
+parse_server_options(int argc,
+                     const char **argv,
+                     const char **_socket_path,
+                     const char **_keytab_path)
+{
+    poptContext pc;
+    char opt;
+    int ret;
+    int i;
+
+    struct poptOption options[] = {
+        POPT_AUTOHELP
+        { "socket-path", 's', POPT_ARG_STRING, _socket_path, 0,
+          "Path to the server socket", NULL },
+        { "keytab", 'k', POPT_ARG_STRING, _keytab_path, 0,
+          "Path to Kerberos keytab that contains credentials", NULL },
+        POPT_TABLEEND
+    };
+
+    pc = poptGetContext(NULL, argc, argv, options, 0);
+    while ((opt = poptGetNextOpt(pc)) > 0) {
+
+    }
+
+    if (opt != -1 || *_socket_path == NULL) {
         poptPrintUsage(pc, stderr, 0);
         return EINVAL;
     }
@@ -74,17 +99,12 @@ parse_options(int argc,
 }
 
 const char *server_socket_path = NULL;
-int server_socket_fd = -1;
 
 void signal_stop_server(int sig)
 {
     puts("Terminating server.\n");
     if (server_socket_path != NULL) {
         unlink(server_socket_path);
-    }
-
-    if (server_socket_fd != -1) {
-        close(server_socket_fd);
     }
 
     exit(0);
@@ -98,6 +118,11 @@ init_server(const char *socket_path,
     int len;
     int ret;
     int fd;
+
+    if (strlen(socket_path) > 107) {
+        fprintf(stderr, "Socket path is too long\n");
+        return EINVAL;
+    }
 
     signal(SIGINT, signal_stop_server);
     signal(SIGTERM, signal_stop_server);
@@ -116,17 +141,18 @@ init_server(const char *socket_path,
     ret = bind(fd, (struct sockaddr *)&addr, len);
     if (ret != 0) {
         ret = errno;
-        fprintf(stderr, "Unable to bind to %s [%d]: %s\n", socket_path, ret, strerror(ret));
+        fprintf(stderr, "Unable to bind to %s [%d]: %s\n", socket_path,
+                ret, strerror(ret));
         return ret;
     }
 
     server_socket_path = socket_path;
-    server_socket_fd = fd;
 
     ret = listen(fd, 1);
     if (ret != 0) {
         ret = errno;
-        fprintf(stderr, "Unable to listen at %s [%d]: %s\n", socket_path, ret, strerror(ret));
+        fprintf(stderr, "Unable to listen at %s [%d]: %s\n", socket_path,
+                ret, strerror(ret));
         return ret;
     }
 
@@ -157,7 +183,8 @@ init_client(const char *socket_path,
     ret = connect(fd, (struct sockaddr *)&addr, len);
     if (ret != 0) {
         ret = errno;
-        fprintf(stderr, "Unable to connect to %s [%d]: %s\n", socket_path, ret, strerror(ret));
+        fprintf(stderr, "Unable to connect to %s [%d]: %s\n", socket_path,
+                ret, strerror(ret));
         return ret;
     }
 
@@ -176,7 +203,8 @@ set_name(const char *principal,
 
     name_buf.value = (void*)principal;
     name_buf.length = strlen(name_buf.value);
-    major = gss_import_name(&minor, &name_buf, 0, _name);
+    major = gss_import_name(&minor, &name_buf, GSS_C_NT_HOSTBASED_SERVICE,
+                            _name);
     if (GSS_ERROR(major)) {
         fprintf(stderr, "Could not import name\n");
         return EIO;
@@ -185,14 +213,46 @@ set_name(const char *principal,
     return 0;
 }
 
+int
+get_name(gss_name_t name,
+         char **_name)
+{
+    OM_uint32 major = 0;
+    OM_uint32 minor = 0;
+    gss_buffer_desc buf = GSS_C_EMPTY_BUFFER;
+    char *exported;
+
+    major = gss_display_name(&minor, name, &buf, NULL);
+    if (major != GSS_S_COMPLETE) {
+        fprintf(stderr, "Unable to export name\n");
+        return EIO;
+    }
+
+    exported = malloc(buf.length);
+    if (exported == NULL) {
+        gss_release_buffer(&minor, &buf);
+        fprintf(stderr, "Out of memory\n");
+        return ENOMEM;
+    }
+
+    strncpy(exported, buf.value, buf.length);
+    gss_release_buffer(&minor, &buf);
+
+    *_name = exported;
+
+    return 0;
+}
+
 static int
-read_all(int fd, void *buf, size_t len) {
-    size_t remaining = len;
+read_all(int fd, void *buf, uint32_t len) {
+    uint32_t remaining = len;
     ssize_t num;
 
     while (remaining != 0) {
         num = read(fd, buf, remaining);
-        if (num == -1) {
+        if (num == 0) {
+            return ENOLINK;
+        } else if (num == -1) {
             return errno;
         }
 
@@ -202,14 +262,14 @@ read_all(int fd, void *buf, size_t len) {
     return 0;
 }
 
-static int
+int
 read_buf(int fd, uint8_t **_buf, size_t *_len)
 {
-    size_t len;
+    uint32_t len;
     uint8_t *buf;
     int ret;
 
-    ret = read_all(fd, &len, sizeof(size_t));
+    ret = read_all(fd, &len, sizeof(uint32_t));
     if (ret != 0) {
         return ret;
     }
@@ -218,7 +278,6 @@ read_buf(int fd, uint8_t **_buf, size_t *_len)
     if (buf == NULL) {
         return ENOMEM;
     }
-    memset(buf, 0, len);
 
     ret = read_all(fd, buf, len);
     if (ret != 0) {
@@ -233,8 +292,8 @@ read_buf(int fd, uint8_t **_buf, size_t *_len)
 }
 
 static int
-write_all(int fd, void *buf, size_t len) {
-    size_t remaining = len;
+write_all(int fd, void *buf, uint32_t len) {
+    uint32_t remaining = len;
     ssize_t num;
 
     while (remaining != 0) {
@@ -249,111 +308,17 @@ write_all(int fd, void *buf, size_t len) {
     return 0;
 }
 
-static int
+int
 write_buf(int fd, uint8_t *buf, size_t len)
 {
     int ret;
 
-    ret = write_all(fd, &len, sizeof(size_t));
+    ret = write_all(fd, &len, sizeof(uint32_t));
     if (ret != 0) {
         return ret;
     }
 
     ret = write_all(fd, buf, len);
-
-    return ret;
-}
-
-int
-establish_context(const char *principal,
-                  gss_cred_id_t creds,
-                  OM_uint32 flags,
-                  int fd,
-                  bool initiator)
-{
-    bool established;
-    gss_ctx_id_t ctx = GSS_C_NO_CONTEXT;
-    gss_buffer_desc input_token = GSS_C_EMPTY_BUFFER;
-    gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
-    gss_name_t target_name = GSS_C_NO_NAME;
-    gss_OID mech_type;
-    OM_uint32 major = 0;
-    OM_uint32 minor = 0;
-    OM_uint32 ret_flags;
-    int ret;
-
-    if (initiator) {
-        ret = set_name(principal, &target_name);
-        if (ret != 0) {
-            return ret;
-        }
-    } else {
-        ret = read_buf(fd, (uint8_t **)&input_token.value, &input_token.length);
-        if (ret != 0) {
-            fprintf(stderr, "Unable to read data [%d]: %s\n", ret, strerror(ret));;
-            goto done;
-        }
-    }
-
-    /* Do the handshake. */
-    established = false;
-    while (!established) {
-        if (initiator) {
-            major = gss_init_sec_context(&minor, creds, &ctx,
-                                        target_name, GSS_C_NO_OID, flags, 0,
-                                        NULL, &input_token, NULL, &output_token,
-                                        &ret_flags, NULL);
-        } else {
-            major = gss_accept_sec_context(&minor, &ctx, creds, &input_token,
-                                        NULL, &target_name, &mech_type,
-                                        &output_token, &ret_flags, NULL, NULL);
-        }
-
-        free(input_token.value);
-        memset(&input_token, 0, sizeof(gss_buffer_desc));
-
-        if (major & GSS_S_CONTINUE_NEEDED || output_token.length > 0) {
-            ret = write_buf(fd, output_token.value, output_token.length);
-            if (ret != 0) {
-                fprintf(stderr, "Unable to write data [%d]: %s\n", ret, strerror(ret));;
-                goto done;
-            }
-        }
-
-        gss_release_buffer(&minor, &output_token);
-        if (GSS_ERROR(major)) {
-            fprintf(stderr, "gss_init_sec_context() error major 0x%x\n", major);
-            ret = EIO;
-            goto done;
-        }
-
-        if (major & GSS_S_CONTINUE_NEEDED) {
-            ret = read_buf(fd, (uint8_t **)&input_token.value, &input_token.length);
-            if (ret != 0) {
-                fprintf(stderr, "Unable to read data [%d]: %s\n", ret, strerror(ret));;
-                goto done;
-            }
-        } else if (major == GSS_S_COMPLETE) {
-            established = true;
-        } else {
-            fprintf(stderr, "major not complete or continue but not error\n");
-            ret = EIO;
-            goto done;
-        }
-    }
-
-    if (ret_flags & flags != flags) {
-        fprintf(stderr, "Negotiated context does not support requested flags\n");
-        ret = EIO;
-        goto done;
-    }
-
-    ret = 0;
-
-done:
-    /* Do not request a context deletion token; pass NULL. */
-    gss_delete_sec_context(&minor, &ctx, NULL);
-    gss_release_name(&minor, &target_name);
 
     return ret;
 }
