@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -228,12 +229,13 @@ get_name(gss_name_t name,
         return EIO;
     }
 
-    exported = malloc(buf.length);
+    exported = malloc(buf.length + 1);
     if (exported == NULL) {
         gss_release_buffer(&minor, &buf);
         fprintf(stderr, "Out of memory\n");
         return ENOMEM;
     }
+    memset(exported, 0, buf.length + 1);
 
     strncpy(exported, buf.value, buf.length);
     gss_release_buffer(&minor, &buf);
@@ -241,6 +243,25 @@ get_name(gss_name_t name,
     *_name = exported;
 
     return 0;
+}
+
+void
+print_gss_status(const char *message, OM_uint32 status_code)
+{
+    OM_uint32 message_context;
+    OM_uint32 major;
+    OM_uint32 minor;
+    gss_buffer_desc status_string;
+
+    message_context = 0;
+    do {
+        major = gss_display_status(&minor, status_code, GSS_C_GSS_CODE,
+                                   GSS_C_NO_OID, &message_context,
+                                   &status_string);
+        fprintf(stderr, "%s: %.*s\n", message,
+                status_string.length, status_string.value);
+        gss_release_buffer(&minor, &status_string);
+    } while (message_context != 0);
 }
 
 static int

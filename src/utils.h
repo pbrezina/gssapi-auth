@@ -49,6 +49,9 @@ int
 get_name(gss_name_t name,
          char **_name);
 
+void
+print_gss_status(const char *message, OM_uint32 status_code);
+
 int
 read_buf(int fd, uint8_t **_buf, size_t *_len);
 

@@ -37,10 +37,12 @@ initiator_establish_context(const char *service,
     gss_ctx_id_t ctx = GSS_C_NO_CONTEXT;
     gss_buffer_desc input_token = GSS_C_EMPTY_BUFFER;
     gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
+    gss_buffer_t buffer;
     gss_name_t target_name = GSS_C_NO_NAME;
     gss_OID mech_type;
     OM_uint32 major = 0;
     OM_uint32 minor = 0;
+    OM_uint32 ctx_minor = 0;
     OM_uint32 ret_flags;
     int ret;
 
@@ -52,7 +54,7 @@ initiator_establish_context(const char *service,
     /* Do the handshake. */
     established = false;
     while (!established) {
-        major = gss_init_sec_context(&minor, GSS_C_NO_CREDENTIAL, &ctx,
+        major = gss_init_sec_context(&ctx_minor, GSS_C_NO_CREDENTIAL, &ctx,
                                      target_name, GSS_C_NO_OID, flags, 0,
                                      NULL, &input_token, NULL, &output_token,
                                      &ret_flags, NULL);
@@ -71,7 +73,10 @@ initiator_establish_context(const char *service,
 
         gss_release_buffer(&minor, &output_token);
         if (GSS_ERROR(major)) {
-            fprintf(stderr, "gss_init_sec_context() error major 0x%x\n", major);
+            fprintf(stderr, "gss_init_sec_context() [maj:0x%x, min:0x%x]\n",
+                    major, ctx_minor);
+            print_gss_status("GSS Major", major);
+            print_gss_status("GSS Minor", ctx_minor);
             ret = EIO;
             goto done;
         }

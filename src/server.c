@@ -45,24 +45,26 @@ acceptor_establish_context(OM_uint32 flags,
     gss_OID mech_type;
     OM_uint32 major = 0;
     OM_uint32 minor = 0;
+    OM_uint32 ctx_minor = 0;
     OM_uint32 ret_flags;
     char *str_name;
     int ret;
 
-    ret = read_buf(fd, (uint8_t **)&input_token.value, &input_token.length);
-    if (ret == ENOLINK) {
-        fprintf(stderr,
-                "Client closed the connection before sending input data\n");
-        goto done;
-    } else if (ret != 0) {
-        fprintf(stderr, "Unable to read data [%d]: %s\n", ret, strerror(ret));;
-        goto done;
-    }
-
     /* Do the handshake. */
     established = false;
     while (!established) {
-        major = gss_accept_sec_context(&minor, &ctx, GSS_C_NO_CREDENTIAL,
+        ret = read_buf(fd, (uint8_t **)&input_token.value, &input_token.length);
+        if (ret == ENOLINK) {
+            fprintf(stderr,
+                    "Client closed the connection before sending input data\n");
+            goto done;
+        } else if (ret != 0) {
+            fprintf(stderr, "Unable to read data [%d]: %s\n",
+                    ret, strerror(ret));;
+            goto done;
+        }
+
+        major = gss_accept_sec_context(&ctx_minor, &ctx, GSS_C_NO_CREDENTIAL,
                                        &input_token, NULL, &client_name,
                                        &mech_type, &output_token, &ret_flags,
                                        NULL, NULL);
@@ -81,23 +83,17 @@ acceptor_establish_context(OM_uint32 flags,
 
         gss_release_buffer(&minor, &output_token);
         if (GSS_ERROR(major)) {
-            fprintf(stderr, "gss_accept_sec_context() error major 0x%x\n",
-                    major);
+            fprintf(stderr, "gss_accept_sec_context() [maj:0x%x, min:0x%x]\n",
+                    major, ctx_minor);
+            print_gss_status("GSS Major", major);
+            print_gss_status("GSS Minor", ctx_minor);
             ret = EIO;
             goto done;
         }
 
-        if (major == GSS_S_CONTINUE_NEEDED) {
-            ret = read_buf(fd, (uint8_t **)&input_token.value,
-                           &input_token.length);
-            if (ret != 0) {
-                fprintf(stderr, "Unable to read data [%d]: %s\n",
-                        ret, strerror(ret));;
-                goto done;
-            }
-        } else if (major == GSS_S_COMPLETE) {
+        if (major == GSS_S_COMPLETE) {
             established = true;
-        } else {
+        } else if (major != GSS_S_CONTINUE_NEEDED) {
             fprintf(stderr, "Context is not established but major has "
                     "unexpected value: %x\n", major);
             ret = EIO;
