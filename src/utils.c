@@ -246,7 +246,7 @@ get_name(gss_name_t name,
 }
 
 void
-print_gss_status(const char *message, OM_uint32 status_code)
+print_gss_status(const char *message, OM_uint32 status_code, int type)
 {
     OM_uint32 message_context;
     OM_uint32 major;
@@ -255,7 +255,7 @@ print_gss_status(const char *message, OM_uint32 status_code)
 
     message_context = 0;
     do {
-        major = gss_display_status(&minor, status_code, GSS_C_GSS_CODE,
+        major = gss_display_status(&minor, status_code, type,
                                    GSS_C_NO_OID, &message_context,
                                    &status_string);
         fprintf(stderr, "%s: %.*s\n", message,

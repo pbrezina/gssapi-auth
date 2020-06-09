@@ -85,8 +85,8 @@ acceptor_establish_context(OM_uint32 flags,
         if (GSS_ERROR(major)) {
             fprintf(stderr, "gss_accept_sec_context() [maj:0x%x, min:0x%x]\n",
                     major, ctx_minor);
-            print_gss_status("GSS Major", major);
-            print_gss_status("GSS Minor", ctx_minor);
+            print_gss_status("GSS Major", major, GSS_C_GSS_CODE);
+            print_gss_status("GSS Minor", ctx_minor, GSS_C_MECH_CODE);
             ret = EIO;
             goto done;
         }
